@@ -1,7 +1,8 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const puppeteer = require('puppeteer-extra');
-const { VIDEOSTR_BASE_URL, FMOVIES_BASE_URL, BROWSER_HEADERS, DECRYPTION_KEYS_URL } = require('../config');
+const { VIDEOSTR_BASE_URL, FMOVIES_BASE_URL, BROWSER_HEADERS } = require('../config');
+const selectors = require('../config/selectors.json'); // <-- 1. IMPORT the new file
 const fmoviesService = require('./fmovies');
 const { parseMasterPlaylist } = require('../utils/playlistParser');
 const { streamCache } = require('./cache');
@@ -31,8 +32,9 @@ async function getStreamData(id, type) {
             const embedPageHtml = await axios.get(embedUrl, { headers: { ...BROWSER_HEADERS, 'Referer': FMOVIES_BASE_URL + '/' } });
             const $$ = cheerio.load(embedPageHtml.data);
 
-            let k_token = $$('script[nonce]').attr('nonce') || $$('div[data-dpi]').attr('data-dpi');
-            const embedIdMatch = embedUrl.match(/\/e-1\/([a-zA-Z0-9]+)/);
+            // 2. USE selectors from config
+            let k_token = $$(selectors.videostr.embed.tokenNonce).attr('nonce') || $$(selectors.videostr.embed.tokenDpi).attr('data-dpi');
+            const embedIdMatch = embedUrl.match(new RegExp(selectors.videostr.embed.embedIdRegex)); // Note: new RegExp() is needed here
             const embedId = embedIdMatch ? embedIdMatch[1] : null;
             if (!k_token || !embedId) continue;
             
@@ -93,11 +95,12 @@ async function getStreamData(id, type) {
             await page.goto(embedUrl, { waitUntil: 'networkidle2', timeout: 45000 });
 
             try {
-                const iframeElement = await page.waitForSelector('iframe', { timeout: 15000 });
+                // 3. USE selectors for Puppeteer
+                const iframeElement = await page.waitForSelector(selectors.videostr.embed.iframe, { timeout: 15000 });
                 const frame = await iframeElement.contentFrame();
                 if (!frame) throw new Error('Could not get iframe content.');
-                await frame.waitForSelector('#player, .jw-media, .play-overlay', { timeout: 15000 });
-                await frame.click('#player, .jw-media, .play-overlay');
+                await frame.waitForSelector(selectors.videostr.embed.player, { timeout: 15000 });
+                await frame.click(selectors.videostr.embed.player);
             } catch (clickError) {
                 console.log(`[WARN] Could not click player: ${clickError.message}.`);
             }

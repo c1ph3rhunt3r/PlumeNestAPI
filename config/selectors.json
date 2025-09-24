@@ -1,0 +1,28 @@
+{
+  "fmovies": {
+    "search": {
+      "item": ".film_list-wrap .flw-item",
+      "title": "h2.film-name a",
+      "type": ".fdi-type",
+      "year": ".fd-infor span.fdi-item"
+    },
+    "seasons": {
+      "item": ".ss-item"
+    },
+    "episodes": {
+      "item": ".eps-item"
+    },
+    "servers": {
+      "item": ".link-item"
+    }
+  },
+  "videostr": {
+    "embed": {
+      "tokenNonce": "script[nonce]",
+      "tokenDpi": "div[data-dpi]",
+      "embedIdRegex": "/e-1/([a-zA-Z0-9]+)",
+      "iframe": "iframe",
+      "player": "#player, .jw-media, .play-overlay"
+    }
+  }
+}

@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { FMOVIES_BASE_URL, BROWSER_HEADERS } = require('../config');
+const selectors = require('../config/selectors.json'); // <-- 1. IMPORT the new file
 
 async function searchContent(title) {
     const formattedTitle = title.trim().toLowerCase().replace(/\s+/g, '-');
@@ -10,11 +11,12 @@ async function searchContent(title) {
     const $ = cheerio.load(response.data);
 
     const candidates = [];
-    $('.film_list-wrap .flw-item').each((i, el) => {
-        const itemTitle = $(el).find('h2.film-name a').attr('title');
-        const itemHref = $(el).find('h2.film-name a').attr('href');
-        const itemType = $(el).find('.fdi-type').text().toLowerCase();
-        const itemYear = $(el).find('.fd-infor span.fdi-item').first().text();
+    // 2. USE the selectors from the config file
+    $(selectors.fmovies.search.item).each((i, el) => {
+        const itemTitle = $(el).find(selectors.fmovies.search.title).attr('title');
+        const itemHref = $(el).find(selectors.fmovies.search.title).attr('href');
+        const itemType = $(el).find(selectors.fmovies.search.type).text().toLowerCase();
+        const itemYear = $(el).find(selectors.fmovies.search.year).first().text();
 
         if (itemTitle && itemHref) {
             const match = itemHref.match(/-(\d+)$/);
@@ -37,7 +39,8 @@ async function getSeasons(showId) {
     const seasonListHtml = await axios.get(`${FMOVIES_BASE_URL}/ajax/season/list/${showId}`, { headers: BROWSER_HEADERS });
     const $ = cheerio.load(seasonListHtml.data);
     const seasons = [];
-    $('.ss-item').each((i, el) => {
+    // 3. USE the selector
+    $(selectors.fmovies.seasons.item).each((i, el) => {
         seasons.push({
             seasonId: $(el).attr('data-id'),
             seasonNumber: $(el).attr('data-season') || $(el).text().trim().replace('Season ', ''),
@@ -50,7 +53,8 @@ async function getEpisodes(seasonId) {
     const episodeListHtml = await axios.get(`${FMOVIES_BASE_URL}/ajax/season/episodes/${seasonId}`, { headers: BROWSER_HEADERS });
     const $ = cheerio.load(episodeListHtml.data);
     const episodes = [];
-    $('.eps-item').each((i, el) => {
+    // 4. USE the selector
+    $(selectors.fmovies.episodes.item).each((i, el) => {
         episodes.push({
             episodeId: $(el).attr('data-id'),
             title: $(el).attr('title'),
@@ -67,7 +71,8 @@ async function getServers(id, type) {
     const serversHtmlResponse = await axios.get(serverListUrl, { headers: BROWSER_HEADERS });
     const $ = cheerio.load(serversHtmlResponse.data);
     const servers = [];
-    $('.link-item').each((i, el) => {
+    // 5. USE the selector
+    $(selectors.fmovies.servers.item).each((i, el) => {
         const serverId = $(el).attr('data-id') || $(el).attr('data-linkid');
         servers.push({ id: serverId, name: $(el).attr('title').replace('Server ', '') });
     });
