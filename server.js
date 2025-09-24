@@ -3,6 +3,7 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const config = require('./config');
+const logger = require('./config/logger'); // <-- IMPORT LOGGER
 const { metadataCache } = require('./services/cache');
 const fmoviesService = require('./services/fmovies');
 const tmdbService = require('./services/tmdb');
@@ -10,24 +11,22 @@ const streamService = require('./services/stream');
 
 const app = express();
 
-// --- MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
 
-// --- API ENDPOINTS ---
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
 app.get('/search', async (req, res) => {
     const { title, type } = req.query;
     if (!title) return res.status(400).json({ error: 'Title query parameter is required.' });
-
+    
     const cacheKey = `search-${type || 'any'}-${title.trim().toLowerCase()}`;
     const cachedData = metadataCache.get(cacheKey);
     if (cachedData) {
-        console.log(`[LOG] Cache HIT for search key: ${cacheKey}.`);
+        logger.info(`Cache HIT for search key: ${cacheKey}.`);
         return res.json(cachedData);
     }
-    console.log(`[LOG] Cache MISS for search key: ${cacheKey}.`);
+    logger.info(`Cache MISS for search key: ${cacheKey}.`);
 
     try {
         const fmoviesCandidates = await fmoviesService.searchContent(title);
@@ -35,27 +34,32 @@ app.get('/search', async (req, res) => {
             return res.status(404).json({ error: 'Content not found.' });
         }
         
+        const metadataPromises = fmoviesCandidates.map(candidate => 
+            tmdbService.getTmdbMetadata(candidate.title, candidate.type, candidate.year)
+                       .then(tmdbData => ({ ...candidate, ...tmdbData }))
+        );
+
+        const enrichedCandidates = await Promise.all(metadataPromises);
+
         let bestCombinedMatch = null;
         let bestScore = -1;
 
-        for (const fmoviesCandidate of fmoviesCandidates) {
-            const tmdbData = await tmdbService.getTmdbMetadata(fmoviesCandidate.title, fmoviesCandidate.type, fmoviesCandidate.year);
-            let currentScore = 0;
-            if (tmdbData) {
-                if (fmoviesCandidate.title.toLowerCase() === title.toLowerCase()) currentScore += 10;
-                if (type && fmoviesCandidate.type === type.toLowerCase()) currentScore += 5;
+        for (const candidate of enrichedCandidates) {
+            if (candidate.tmdbId) {
+                let currentScore = 0;
+                if (candidate.title.toLowerCase() === title.toLowerCase()) currentScore += 10;
+                if (type && candidate.type === type.toLowerCase()) currentScore += 5;
                 currentScore += 1;
                 if (currentScore > bestScore) {
                     bestScore = currentScore;
-                    bestCombinedMatch = { ...fmoviesCandidate, ...tmdbData };
+                    bestCombinedMatch = candidate;
                 }
             }
         }
 
         if (!bestCombinedMatch) {
-            const firstFmoviesResult = fmoviesCandidates[0];
-            const fallbackMetadata = await tmdbService.getTmdbMetadata(firstFmoviesResult.title, firstFmoviesResult.type, firstFmoviesResult.year);
-            bestCombinedMatch = { ...firstFmoviesResult, ...fallbackMetadata };
+            logger.warn('No strong match found, falling back to first result.');
+            bestCombinedMatch = enrichedCandidates[0];
         }
         
         if (!bestCombinedMatch || !bestCombinedMatch.fmoviesId) {
@@ -66,21 +70,25 @@ app.get('/search', async (req, res) => {
         delete bestCombinedMatch.fmoviesId;
         
         metadataCache.set(cacheKey, bestCombinedMatch);
-        console.log(`[SUCCESS] Responding with best match: ${bestCombinedMatch.title}`);
+        logger.info(`[SUCCESS] Responding with best match: ${bestCombinedMatch.title}`);
         res.json(bestCombinedMatch);
     } catch (error) {
+        logger.error('Error in /search endpoint', { message: error.message });
         res.status(500).json({ error: error.message });
     }
 });
 
 app.get('/stream', async (req, res) => {
     const { id, type } = req.query;
+    logger.info(`--- New Stream Request --- ID: ${id}, Type: ${type}`);
     if (!id || !type) return res.status(400).json({ error: 'ID and type are required.' });
     if (type !== 'movie' && type !== 'tv') return res.status(400).json({ error: "Type must be 'movie' or 'tv'."});
+    
     try {
         const streamData = await streamService.getStreamData(id, type);
         res.json(streamData);
     } catch (error) {
+        logger.error(`Error in /stream endpoint for ID ${id}`, { message: error.message });
         res.status(500).json({ error: error.message });
     }
 });
@@ -92,16 +100,17 @@ app.get('/seasons', async (req, res) => {
     const cacheKey = `seasons-${showId}`;
     const cachedData = metadataCache.get(cacheKey);
     if (cachedData) {
-        console.log(`[LOG] Cache HIT for seasons key: ${cacheKey}.`);
+        logger.info(`Cache HIT for seasons key: ${cacheKey}.`);
         return res.json(cachedData);
     }
 
     try {
         const seasons = await fmoviesService.getSeasons(showId);
         metadataCache.set(cacheKey, seasons);
-        console.log(`[SUCCESS] Found ${seasons.length} seasons for showId: ${showId}`);
+        logger.info(`[SUCCESS] Found ${seasons.length} seasons for showId: ${showId}`);
         res.json(seasons);
     } catch (error) {
+        logger.error(`Error in /seasons for showId ${showId}`, { message: error.message });
         res.status(500).json({ error: 'Failed to fetch seasons.' });
     }
 });
@@ -113,16 +122,17 @@ app.get('/episodes', async (req, res) => {
     const cacheKey = `episodes-${seasonId}`;
     const cachedData = metadataCache.get(cacheKey);
     if (cachedData) {
-        console.log(`[LOG] Cache HIT for episodes key: ${cacheKey}.`);
+        logger.info(`Cache HIT for episodes key: ${cacheKey}.`);
         return res.json(cachedData);
     }
 
     try {
         const episodes = await fmoviesService.getEpisodes(seasonId);
         metadataCache.set(cacheKey, episodes);
-        console.log(`[SUCCESS] Found ${episodes.length} episodes for seasonId: ${seasonId}`);
+        logger.info(`[SUCCESS] Found ${episodes.length} episodes for seasonId: ${seasonId}`);
         res.json(episodes);
     } catch (error) {
+        logger.error(`Error in /episodes for seasonId ${seasonId}`, { message: error.message });
         res.status(500).json({ error: 'Failed to fetch episodes.' });
     }
 });
@@ -146,20 +156,17 @@ app.post('/download', (req, res) => {
     
     const ytdlp = spawn('yt-dlp', args);
     
-    console.log(`\n--- New Download Request ---`);
-    console.log(`Starting download for: ${title}`);
-    console.log(`Command: yt-dlp ${args.join(' ')}`);
+    logger.info(`--- New Download Request: ${title} ---`, { args });
 
-    ytdlp.stdout.on('data', (data) => console.log(`[yt-dlp] ${data.toString().trim()}`));
-    ytdlp.stderr.on('data', (data) => console.error(`[yt-dlp ERROR] ${data.toString().trim()}`));
+    ytdlp.stdout.on('data', (data) => logger.info(`[yt-dlp] ${data.toString().trim()}`));
+    ytdlp.stderr.on('data', (data) => logger.error(`[yt-dlp ERROR] ${data.toString().trim()}`));
     ytdlp.on('close', (code) => {
-        console.log(`[SUCCESS] Download for "${title}" finished with code ${code}.`);
+        logger.info(`Download for "${title}" finished with code ${code}.`);
     });
     
     res.status(202).json({ message: `Download started for "${title}". Check server logs for progress.` });
 });
 
-// --- START SERVER ---
 app.listen(config.PORT, () => {
-    console.log(`PlumeNest Personal API server is listening on http://localhost:${config.PORT}`);
+    logger.info(`PlumeNest Personal API server is listening on http://localhost:${config.PORT}`);
 });

@@ -1,5 +1,6 @@
 const axios = require('axios');
 const { TMDB_API_KEY } = require('../config');
+const logger = require('../config/logger'); // <-- IMPORT LOGGER
 
 async function getTmdbMetadata(title, type, year = null) {
     try {
@@ -7,11 +8,11 @@ async function getTmdbMetadata(title, type, year = null) {
         const params = { api_key: TMDB_API_KEY, query: title };
         if (year) params.year = year;
 
-        console.log(`[LOG] Searching TMDb for: ${title} (Type: ${searchType})`);
+        logger.info(`Searching TMDb for: "${title}" (Type: ${searchType})`);
         const searchResponse = await axios.get(`https://api.themoviedb.org/3/search/${searchType}`, { params });
         const showResult = searchResponse.data.results[0];
         if (!showResult) {
-            console.log(`[LOG] No TMDb result found for: ${title}`);
+            logger.warn(`No TMDb result found for: "${title}"`);
             return null;
         }
 
@@ -19,10 +20,10 @@ async function getTmdbMetadata(title, type, year = null) {
         const fullPosterUrl = poster_path ? `https://image.tmdb.org/t/p/w500${poster_path}` : null;
         const releaseYear = (release_date || first_air_date || "").substring(0, 4);
 
-        console.log(`[LOG] Found TMDb match: ${showResult.name || showResult.title} (ID: ${id})`);
+        logger.info(`Found TMDb match: ${showResult.name || showResult.title} (ID: ${id})`);
         return { overview, posterUrl: fullPosterUrl, tmdbId: id, year: releaseYear };
     } catch (error) {
-        console.error(`[ERROR] in getTmdbMetadata for "${title}":`, error.message);
+        logger.error(`Error in getTmdbMetadata for "${title}"`, { message: error.message });
         return null;
     }
 }
