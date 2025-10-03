@@ -14,6 +14,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@supabase/supabase-js": "^2.58.0",
     "axios": "^1.12.2",
     "cheerio": "^1.1.2",
     "child_process": "^1.0.2",

@@ -1,13 +1,12 @@
 const express = require('express');
 const cors = require('cors');
-// const { spawn } = require('child_process'); <--- REMOVED
-// const path = require('path'); <--- REMOVED
 const config = require('./config');
 const logger = require('./config/logger');
 const { redisClient } = require('./services/cache');
 const fmoviesService = require('./services/fmovies');
-const tmdbService =require('./services/tmdb');
+const tmdbService = require('./services/tmdb');
 const streamService = require('./services/stream');
+const supabase = require('./services/database');
 const { auth } = require('express-oauth2-jwt-bearer');
 
 const app = express();
@@ -35,65 +34,75 @@ app.use(cors());
 app.use(express.json());
 
 // --- PUBLIC API ENDPOINTS ---
-
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
-// --- UPDATED /health ENDPOINT WITH TIMEOUT ---
-
-// Helper function that creates a promise that rejects after a specified time
 const timeout = (ms, promise) => {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(() => {
             reject(new Error(`Operation timed out after ${ms}ms`));
         }, ms);
-
-        promise
-            .then(value => {
-                clearTimeout(timer);
-                resolve(value);
-            })
-            .catch(reason => {
-                clearTimeout(timer);
-                reject(reason);
-            });
+        promise.then(value => { clearTimeout(timer); resolve(value); })
+               .catch(reason => { clearTimeout(timer); reject(reason); });
     });
 };
-
 app.get('/health', async (req, res) => {
     try {
-        // We will now "race" the Redis ping against a 2-second timeout.
-        logger.info('Performing health check...');
-        const redisPing = await timeout(2000, redisClient.ping()); // 2000ms = 2 seconds
-
-        if (redisPing !== 'PONG') {
-            throw new Error('Redis did not respond with PONG.');
-        }
-
-        logger.info('Health check successful.');
-        res.status(200).json({
-            status: 'ok',
-            dependencies: {
-                redis: 'connected'
-            },
-            timestamp: new Date().toISOString()
-        });
+        const redisPing = await timeout(2000, redisClient.ping());
+        if (redisPing !== 'PONG') throw new Error('Redis did not respond correctly.');
+        res.status(200).json({ status: 'ok', dependencies: { redis: 'connected' } });
     } catch (error) {
         logger.error('Health check failed!', { message: error.message });
-        res.status(503).json({
-            status: 'error',
-            dependencies: {
-                redis: 'disconnected'
-            },
-            error: error.message
-        });
+        res.status(503).json({ status: 'error', dependencies: { redis: 'disconnected' }, error: error.message });
     }
 });
 
 // --- API VERSION 1 ROUTER ---
 const apiV1Router = express.Router();
 
+// Apply the security middleware to all v1 routes
 apiV1Router.use(apiKeyMiddleware);
 apiV1Router.use(checkJwt);
+
+// --- NEW DEDICATED USER SYNC ENDPOINT ---
+apiV1Router.post('/users/sync', async (req, res) => {
+    const auth0UserId = req.auth.payload.sub;
+    logger.info(`Sync request received for Auth0 ID: ${auth0UserId}`);
+
+    try {
+        let { data: user, error: selectError } = await supabase
+            .from('users')
+            .select('*')
+            .eq('auth0_user_id', auth0UserId)
+            .single();
+
+        if (selectError && selectError.code !== 'PGRST116') { // Ignore "0 rows" error
+            throw selectError;
+        }
+
+        if (!user) {
+            logger.info(`User not found. Creating new profile for Auth0 ID: ${auth0UserId}`);
+            const { data: newUser, error: insertError } = await supabase
+                .from('users')
+                .insert([{ auth0_user_id: auth0UserId }])
+                .select()
+                .single();
+            
+            if (insertError) throw insertError;
+            user = newUser;
+            res.status(201).json({ status: 'created', user });
+        } else {
+            logger.info(`User already exists. Profile sync successful for Auth0 ID: ${auth0UserId}`);
+            res.status(200).json({ status: 'ok', user });
+        }
+    } catch (error) {
+        logger.error('Failed to sync user with database', { auth0_id: auth0UserId, message: error.message });
+        res.status(500).json({ error: 'Database user synchronization failed.' });
+    }
+});
+
+// --- CORE API ENDPOINTS ---
+// The user sync middleware has been removed from here.
+// These endpoints now assume the user has already been synced.
 
 apiV1Router.get('/search', async (req, res) => {
     logger.info(`Search request from user: ${req.auth.payload.sub}`);
@@ -106,12 +115,11 @@ apiV1Router.get('/search', async (req, res) => {
         logger.info(`Cache HIT for search key: ${cacheKey}.`);
         return res.json(JSON.parse(cachedString));
     }
-    logger.info(`Cache MISS for search key: ${cacheKey}.`);
-
+    
     try {
         const fmoviesCandidates = await fmoviesService.searchContent(title);
+        // ... (rest of the search logic is unchanged)
         if (fmoviesCandidates.length === 0) return res.status(404).json({ error: 'Content not found.' });
-
         const metadataPromises = fmoviesCandidates.map(c => tmdbService.getTmdbMetadata(c.title, c.type, c.year).then(d => ({ ...c, ...d })));
         const enrichedCandidates = await Promise.all(metadataPromises);
 
@@ -139,7 +147,6 @@ apiV1Router.get('/search', async (req, res) => {
         delete bestCombinedMatch.fmoviesId;
         
         await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 });
-        logger.info(`[SUCCESS] Responding with best match: ${bestCombinedMatch.title}`);
         res.json(bestCombinedMatch);
     } catch (error) {
         logger.error('Error in /search endpoint', { message: error.message, stack: error.stack });
@@ -151,7 +158,6 @@ apiV1Router.get('/stream', async (req, res) => {
     logger.info(`Stream request from user: ${req.auth.payload.sub}`);
     const { id, type } = req.query;
     if (!id || !type) return res.status(400).json({ error: 'ID and type are required.' });
-    if (type !== 'movie' && type !== 'tv') return res.status(400).json({ error: "Type must be 'movie' or 'tv'."});
     
     try {
         const streamData = await streamService.getStreamData(id, type);
@@ -173,7 +179,6 @@ apiV1Router.get('/seasons', async (req, res) => {
     try {
         const seasons = await fmoviesService.getSeasons(showId);
         await redisClient.set(cacheKey, JSON.stringify(seasons), { EX: 86400 });
-        logger.info(`[SUCCESS] Found ${seasons.length} seasons for showId: ${showId}`);
         res.json(seasons);
     } catch (error) {
         logger.error(`Error in /seasons for showId ${showId}`, { message: error.message });
@@ -192,15 +197,12 @@ apiV1Router.get('/episodes', async (req, res) => {
     try {
         const episodes = await fmoviesService.getEpisodes(seasonId);
         await redisClient.set(cacheKey, JSON.stringify(episodes), { EX: 86400 });
-        logger.info(`[SUCCESS] Found ${episodes.length} episodes for seasonId: ${seasonId}`);
         res.json(episodes);
     } catch (error) {
         logger.error(`Error in /episodes for seasonId ${seasonId}`, { message: error.message });
         res.status(500).json({ error: 'Failed to fetch episodes.' });
     }
 });
-
-// --- THE /download ENDPOINT HAS BEEN REMOVED ---
 
 // Mount the versioned router to the main app
 app.use('/api/v1', apiV1Router);

@@ -24,7 +24,8 @@ FMOVIES_BASE_URL: 'https://fmovies.ro',
 VIDEOSTR_BASE_URL: 'https://videostr.net',
 DECRYPTION_KEYS_URL: 'https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json',
 TMDB_API_KEY: process.env.TMDB_API_KEY,
-
+SUPABASE_URL: process.env.SUPABASE_URL,             // <-- ADD THIS
+SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY,  
 // --- ADD THIS NEW SECTION ---
 FALLBACK_DECRYPTION_KEYS: {
     "mega": "nTAygRRNLS3wo82OtMyfPrWgD9K2UIvcwlj",
