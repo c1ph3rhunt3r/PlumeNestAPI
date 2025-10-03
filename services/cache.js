@@ -1,7 +1,25 @@
-const NodeCache = require('node-cache');
+const redis = require('redis');
+const { REDIS_URL } = require('../config');
+const logger = require('../config/logger');
 
-// TTL in seconds. 14400s = 4 hours for streams. 86400s = 24 hours for metadata.
-const streamCache = new NodeCache({ stdTTL: 14400 });
-const metadataCache = new NodeCache({ stdTTL: 86400 });
+// Create the Redis client
+const redisClient = redis.createClient({
+    url: REDIS_URL
+});
 
-module.exports = { streamCache, metadataCache };
+redisClient.on('error', (err) => {
+    logger.error('Redis Client Error', err);
+});
+
+// Immediately connect to Redis.
+// We use an IIFE (Immediately Invoked Function Expression) to handle the async connection.
+(async () => {
+    try {
+        await redisClient.connect();
+        logger.info('Successfully connected to Redis.');
+    } catch (err) {
+        logger.error('Failed to connect to Redis.', err);
+    }
+})();
+
+module.exports = { redisClient };

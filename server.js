@@ -3,28 +3,49 @@ const cors = require('cors');
 const { spawn } = require('child_process');
 const path = require('path');
 const config = require('./config');
-const logger = require('./config/logger'); // <-- IMPORT LOGGER
-const { metadataCache } = require('./services/cache');
+const logger = require('./config/logger');
+const { redisClient } = require('./services/cache');
 const fmoviesService = require('./services/fmovies');
 const tmdbService = require('./services/tmdb');
 const streamService = require('./services/stream');
 
+// --- 1. IMPORT AUTH0 MIDDLEWARE ---
+const { auth } = require('express-oauth2-jwt-bearer');
+
 const app = express();
 
+// --- 2. CONFIGURE THE JWT CHECK ---
+const checkJwt = auth({
+  audience: config.AUTH0_AUDIENCE, // The Identifier of your API in Auth0
+  issuerBaseURL: config.AUTH0_ISSUER_BASE_URL, // The "Issuer Base URL" from your API settings in Auth0
+});
+
+// --- MIDDLEWARE ---
 app.use(cors());
 app.use(express.json());
 
+// --- API ENDPOINTS ---
+
+// This is a public endpoint that anyone can access.
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
-app.get('/search', async (req, res) => {
+// --- 3. APPLY THE MIDDLEWARE ---
+// All routes defined BELOW this line will now require a valid JWT.
+// The middleware will automatically validate the token. If it's invalid, it will send a 401 error.
+// If it's valid, it will attach the user's information to `req.auth` and proceed.
+
+app.get('/search', checkJwt, async (req, res) => {
+    // We can now access the user's unique ID from the token like this:
+    logger.info(`Search request received from user: ${req.auth.payload.sub}`);
+    
     const { title, type } = req.query;
     if (!title) return res.status(400).json({ error: 'Title query parameter is required.' });
-    
+
     const cacheKey = `search-${type || 'any'}-${title.trim().toLowerCase()}`;
-    const cachedData = metadataCache.get(cacheKey);
-    if (cachedData) {
+    const cachedString = await redisClient.get(cacheKey);
+    if (cachedString) {
         logger.info(`Cache HIT for search key: ${cacheKey}.`);
-        return res.json(cachedData);
+        return res.json(JSON.parse(cachedString));
     }
     logger.info(`Cache MISS for search key: ${cacheKey}.`);
 
@@ -38,7 +59,6 @@ app.get('/search', async (req, res) => {
             tmdbService.getTmdbMetadata(candidate.title, candidate.type, candidate.year)
                        .then(tmdbData => ({ ...candidate, ...tmdbData }))
         );
-
         const enrichedCandidates = await Promise.all(metadataPromises);
 
         let bestCombinedMatch = null;
@@ -69,7 +89,7 @@ app.get('/search', async (req, res) => {
         bestCombinedMatch.id = bestCombinedMatch.fmoviesId;
         delete bestCombinedMatch.fmoviesId;
         
-        metadataCache.set(cacheKey, bestCombinedMatch);
+        await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 });
         logger.info(`[SUCCESS] Responding with best match: ${bestCombinedMatch.title}`);
         res.json(bestCombinedMatch);
     } catch (error) {
@@ -78,9 +98,9 @@ app.get('/search', async (req, res) => {
     }
 });
 
-app.get('/stream', async (req, res) => {
+app.get('/stream', checkJwt, async (req, res) => {
+    logger.info(`Stream request received from user: ${req.auth.payload.sub}`);
     const { id, type } = req.query;
-    logger.info(`--- New Stream Request --- ID: ${id}, Type: ${type}`);
     if (!id || !type) return res.status(400).json({ error: 'ID and type are required.' });
     if (type !== 'movie' && type !== 'tv') return res.status(400).json({ error: "Type must be 'movie' or 'tv'."});
     
@@ -93,20 +113,20 @@ app.get('/stream', async (req, res) => {
     }
 });
 
-app.get('/seasons', async (req, res) => {
+app.get('/seasons', checkJwt, async (req, res) => {
     const { showId } = req.query;
     if (!showId) return res.status(400).json({ error: 'showId is required.' });
 
     const cacheKey = `seasons-${showId}`;
-    const cachedData = metadataCache.get(cacheKey);
-    if (cachedData) {
+    const cachedString = await redisClient.get(cacheKey);
+    if (cachedString) {
         logger.info(`Cache HIT for seasons key: ${cacheKey}.`);
-        return res.json(cachedData);
+        return res.json(JSON.parse(cachedString));
     }
 
     try {
         const seasons = await fmoviesService.getSeasons(showId);
-        metadataCache.set(cacheKey, seasons);
+        await redisClient.set(cacheKey, JSON.stringify(seasons), { EX: 86400 });
         logger.info(`[SUCCESS] Found ${seasons.length} seasons for showId: ${showId}`);
         res.json(seasons);
     } catch (error) {
@@ -115,20 +135,20 @@ app.get('/seasons', async (req, res) => {
     }
 });
 
-app.get('/episodes', async (req, res) => {
+app.get('/episodes', checkJwt, async (req, res) => {
     const { seasonId } = req.query;
     if (!seasonId) return res.status(400).json({ error: 'seasonId is required.' });
     
     const cacheKey = `episodes-${seasonId}`;
-    const cachedData = metadataCache.get(cacheKey);
-    if (cachedData) {
+    const cachedString = await redisClient.get(cacheKey);
+    if (cachedString) {
         logger.info(`Cache HIT for episodes key: ${cacheKey}.`);
-        return res.json(cachedData);
+        return res.json(JSON.parse(cachedString));
     }
 
     try {
         const episodes = await fmoviesService.getEpisodes(seasonId);
-        metadataCache.set(cacheKey, episodes);
+        await redisClient.set(cacheKey, JSON.stringify(episodes), { EX: 86400 });
         logger.info(`[SUCCESS] Found ${episodes.length} episodes for seasonId: ${seasonId}`);
         res.json(episodes);
     } catch (error) {
@@ -137,7 +157,7 @@ app.get('/episodes', async (req, res) => {
     }
 });
 
-app.post('/download', (req, res) => {
+app.post('/download', checkJwt, (req, res) => {
     const { streamUrl, downloadPath, title, refererUrl } = req.body;
     if (!streamUrl || !downloadPath || !title || !refererUrl) {
         return res.status(400).json({ error: 'streamUrl, downloadPath, title, and refererUrl are required.' });
