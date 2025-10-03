@@ -26,16 +26,11 @@ app.use(express.json());
 
 // --- API ENDPOINTS ---
 
-// This is a public endpoint that anyone can access.
+// --- API ENDPOINTS ---
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
-// --- 3. APPLY THE MIDDLEWARE ---
-// All routes defined BELOW this line will now require a valid JWT.
-// The middleware will automatically validate the token. If it's invalid, it will send a 401 error.
-// If it's valid, it will attach the user's information to `req.auth` and proceed.
-
+// --- UPDATED /search ENDPOINT WITH PARALLEL REQUESTS ---
 app.get('/search', checkJwt, async (req, res) => {
-    // We can now access the user's unique ID from the token like this:
     logger.info(`Search request received from user: ${req.auth.payload.sub}`);
     
     const { title, type } = req.query;
@@ -50,21 +45,33 @@ app.get('/search', checkJwt, async (req, res) => {
     logger.info(`Cache MISS for search key: ${cacheKey}.`);
 
     try {
+        // Step 1: Get the initial candidates from fmovies (this is still a single request)
         const fmoviesCandidates = await fmoviesService.searchContent(title);
         if (!fmoviesCandidates || fmoviesCandidates.length === 0) {
             return res.status(404).json({ error: 'Content not found.' });
         }
         
+        // Step 2: Create an array of promises, where each promise is a TMDb metadata lookup.
+        // This part does not wait; it just prepares all the requests.
         const metadataPromises = fmoviesCandidates.map(candidate => 
             tmdbService.getTmdbMetadata(candidate.title, candidate.type, candidate.year)
-                       .then(tmdbData => ({ ...candidate, ...tmdbData }))
+                       .then(tmdbData => {
+                           // Combine the original fmovies data with the new TMDb data for each candidate
+                           return { ...candidate, ...tmdbData };
+                       })
         );
+
+        // Step 3: Execute all the TMDb lookups at the same time and wait for them all to complete.
+        // This is the key performance improvement.
         const enrichedCandidates = await Promise.all(metadataPromises);
 
+        // Step 4: Now that we have all the data, loop through the results to find the best match.
+        // This part is the same as before, but it's now working with the fully enriched data.
         let bestCombinedMatch = null;
         let bestScore = -1;
 
         for (const candidate of enrichedCandidates) {
+            // Only score candidates that successfully got a tmdbId
             if (candidate.tmdbId) {
                 let currentScore = 0;
                 if (candidate.title.toLowerCase() === title.toLowerCase()) currentScore += 10;
@@ -77,8 +84,10 @@ app.get('/search', checkJwt, async (req, res) => {
             }
         }
 
+        // Fallback logic if no good match was found
         if (!bestCombinedMatch) {
-            logger.warn('No strong match found, falling back to first result.');
+            logger.warn('No strong match found after enrichment, falling back to the first fmovies result.');
+            // We use enrichedCandidates[0] which will have whatever TMDb data it managed to get (if any).
             bestCombinedMatch = enrichedCandidates[0];
         }
         
@@ -89,14 +98,16 @@ app.get('/search', checkJwt, async (req, res) => {
         bestCombinedMatch.id = bestCombinedMatch.fmoviesId;
         delete bestCombinedMatch.fmoviesId;
         
-        await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 });
+        await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 }); // Cache for 24 hours
         logger.info(`[SUCCESS] Responding with best match: ${bestCombinedMatch.title}`);
         res.json(bestCombinedMatch);
+
     } catch (error) {
-        logger.error('Error in /search endpoint', { message: error.message });
-        res.status(500).json({ error: error.message });
+        logger.error('Error in /search endpoint', { message: error.message, stack: error.stack });
+        res.status(500).json({ error: 'An internal server error occurred during search.' });
     }
 });
+
 
 app.get('/stream', checkJwt, async (req, res) => {
     logger.info(`Stream request received from user: ${req.auth.payload.sub}`);
