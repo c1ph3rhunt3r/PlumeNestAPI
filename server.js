@@ -29,49 +29,47 @@ const apiKeyMiddleware = (req, res, next) => {
     next();
 };
 
-// --- NEW USER SYNC MIDDLEWARE ---
-// This middleware runs AFTER checkJwt and attaches our internal user profile to the request.
+// --- UPDATED USER SYNC MIDDLEWARE ---
 const syncUserMiddleware = async (req, res, next) => {
-    // 'sub' is the standard field for the unique user ID in a JWT payload
     const auth0UserId = req.auth.payload.sub;
     if (!auth0UserId) {
-        return res.status(400).json({ error: 'User ID not found in authentication token.' });
+        return res.status(400).json({ error: 'User ID not found in token.' });
     }
 
     try {
-        // Check if the user already exists in our Supabase 'users' table
-        let { data: user, error: selectError } = await supabase
+        // Check if user exists. We will NOT use .single() here to avoid the 406 error.
+        let { data: users, error: selectError } = await supabase
             .from('users')
-            .select('id, auth0_user_id') // Only select the columns you need
-            .eq('auth0_user_id', auth0UserId)
-            .single();
+            .select('id, auth0_user_id')
+            .eq('auth0_user_id', auth0UserId);
 
-        // Supabase returns an error if no rows are found, which is expected for new users.
-        // We only throw if it's a real database error.
-        if (selectError && selectError.code !== 'PGRST116') { // PGRST116 = "Query returned 0 rows"
-            throw selectError;
+        if (selectError) {
+            throw selectError; // Let the catch block handle any real DB errors
         }
 
-        // If the user doesn't exist, create a new profile for them
+        let user = users && users.length > 0 ? users[0] : null;
+
         if (!user) {
             logger.info(`New user detected. Creating profile for auth0_user_id: ${auth0UserId}`);
             const { data: newUser, error: insertError } = await supabase
                 .from('users')
                 .insert([{ auth0_user_id: auth0UserId }])
                 .select('id, auth0_user_id')
-                .single();
+                .single(); // .single() is safe here because we know we just inserted one row.
             
             if (insertError) throw insertError;
-            user = newUser; // Use the newly created user record
+            user = newUser;
         }
 
-        // Attach our internal user record (from Supabase) to the request object.
-        // All subsequent endpoints will now have access to `req.user`.
         req.user = user;
         next();
 
     } catch (error) {
-        logger.error('Failed to sync user with Supabase database', { auth0_id: auth0UserId, message: error.message });
+        logger.error('Failed to sync user with Supabase database', { 
+            auth0_id: auth0UserId, 
+            message: error.message,
+            details: error.details // Include Supabase-specific details if available
+        });
         return res.status(500).json({ error: 'Database user synchronization failed.' });
     }
 };
