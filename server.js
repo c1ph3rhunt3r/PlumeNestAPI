@@ -8,29 +8,50 @@ const { redisClient } = require('./services/cache');
 const fmoviesService = require('./services/fmovies');
 const tmdbService = require('./services/tmdb');
 const streamService = require('./services/stream');
-
-// --- 1. IMPORT AUTH0 MIDDLEWARE ---
 const { auth } = require('express-oauth2-jwt-bearer');
 
 const app = express();
 
-// --- 2. CONFIGURE THE JWT CHECK ---
+// --- AUTH0 JWT CHECK MIDDLEWARE ---
 const checkJwt = auth({
-  audience: config.AUTH0_AUDIENCE, // The Identifier of your API in Auth0
-  issuerBaseURL: config.AUTH0_ISSUER_BASE_URL, // The "Issuer Base URL" from your API settings in Auth0
+  audience: config.AUTH0_AUDIENCE,
+  issuerBaseURL: config.AUTH0_ISSUER_BASE_URL,
 });
 
-// --- MIDDLEWARE ---
+// --- NEW API KEY CHECK MIDDLEWARE ---
+const apiKeyMiddleware = (req, res, next) => {
+    const providedKey = req.header('X-API-KEY');
+
+    if (!config.API_SECRET_KEY) {
+        logger.error("[FATAL] API_SECRET_KEY is not configured on the server. All requests will be blocked.");
+        return res.status(500).json({ error: 'Server configuration error: Missing API secret key.' });
+    }
+
+    if (!providedKey) {
+        return res.status(401).json({ error: 'Unauthorized: Missing X-API-KEY header.' });
+    }
+
+    if (providedKey !== config.API_SECRET_KEY) {
+        return res.status(403).json({ error: 'Forbidden: Invalid API Key.' });
+    }
+
+    // If the key is valid, proceed to the next middleware or route handler
+    next();
+};
+
+// --- MIDDLEWARE SETUP ---
 app.use(cors());
 app.use(express.json());
 
 // --- API ENDPOINTS ---
 
-// --- API ENDPOINTS ---
+// This is a public endpoint that anyone can access (it does not use the middleware).
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
-// --- UPDATED /search ENDPOINT WITH PARALLEL REQUESTS ---
-app.get('/search', checkJwt, async (req, res) => {
+// All routes defined below will be protected by BOTH the API Key and the Auth0 JWT.
+// The middlewares run in the order they are provided.
+
+app.get('/search', apiKeyMiddleware, checkJwt, async (req, res) => {
     logger.info(`Search request received from user: ${req.auth.payload.sub}`);
     
     const { title, type } = req.query;
@@ -45,33 +66,16 @@ app.get('/search', checkJwt, async (req, res) => {
     logger.info(`Cache MISS for search key: ${cacheKey}.`);
 
     try {
-        // Step 1: Get the initial candidates from fmovies (this is still a single request)
         const fmoviesCandidates = await fmoviesService.searchContent(title);
-        if (!fmoviesCandidates || fmoviesCandidates.length === 0) {
-            return res.status(404).json({ error: 'Content not found.' });
-        }
+        if (fmoviesCandidates.length === 0) return res.status(404).json({ error: 'Content not found.' });
         
-        // Step 2: Create an array of promises, where each promise is a TMDb metadata lookup.
-        // This part does not wait; it just prepares all the requests.
-        const metadataPromises = fmoviesCandidates.map(candidate => 
-            tmdbService.getTmdbMetadata(candidate.title, candidate.type, candidate.year)
-                       .then(tmdbData => {
-                           // Combine the original fmovies data with the new TMDb data for each candidate
-                           return { ...candidate, ...tmdbData };
-                       })
-        );
-
-        // Step 3: Execute all the TMDb lookups at the same time and wait for them all to complete.
-        // This is the key performance improvement.
+        const metadataPromises = fmoviesCandidates.map(c => tmdbService.getTmdbMetadata(c.title, c.type, c.year).then(d => ({ ...c, ...d })));
         const enrichedCandidates = await Promise.all(metadataPromises);
 
-        // Step 4: Now that we have all the data, loop through the results to find the best match.
-        // This part is the same as before, but it's now working with the fully enriched data.
         let bestCombinedMatch = null;
         let bestScore = -1;
 
         for (const candidate of enrichedCandidates) {
-            // Only score candidates that successfully got a tmdbId
             if (candidate.tmdbId) {
                 let currentScore = 0;
                 if (candidate.title.toLowerCase() === title.toLowerCase()) currentScore += 10;
@@ -84,32 +88,24 @@ app.get('/search', checkJwt, async (req, res) => {
             }
         }
 
-        // Fallback logic if no good match was found
         if (!bestCombinedMatch) {
-            logger.warn('No strong match found after enrichment, falling back to the first fmovies result.');
-            // We use enrichedCandidates[0] which will have whatever TMDb data it managed to get (if any).
+            logger.warn('No strong match found, falling back to first result.');
             bestCombinedMatch = enrichedCandidates[0];
-        }
-        
-        if (!bestCombinedMatch || !bestCombinedMatch.fmoviesId) {
-             return res.status(404).json({ error: 'Could not find a reliable match.' });
         }
         
         bestCombinedMatch.id = bestCombinedMatch.fmoviesId;
         delete bestCombinedMatch.fmoviesId;
         
-        await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 }); // Cache for 24 hours
+        await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 });
         logger.info(`[SUCCESS] Responding with best match: ${bestCombinedMatch.title}`);
         res.json(bestCombinedMatch);
-
     } catch (error) {
         logger.error('Error in /search endpoint', { message: error.message, stack: error.stack });
-        res.status(500).json({ error: 'An internal server error occurred during search.' });
+        res.status(500).json({ error: 'An internal server error occurred.' });
     }
 });
 
-
-app.get('/stream', checkJwt, async (req, res) => {
+app.get('/stream', apiKeyMiddleware, checkJwt, async (req, res) => {
     logger.info(`Stream request received from user: ${req.auth.payload.sub}`);
     const { id, type } = req.query;
     if (!id || !type) return res.status(400).json({ error: 'ID and type are required.' });
@@ -124,7 +120,9 @@ app.get('/stream', checkJwt, async (req, res) => {
     }
 });
 
-app.get('/seasons', checkJwt, async (req, res) => {
+// Apply protection to the rest of the endpoints
+app.get('/seasons', apiKeyMiddleware, checkJwt, async (req, res) => {
+    // ... (rest of the function is unchanged)
     const { showId } = req.query;
     if (!showId) return res.status(400).json({ error: 'showId is required.' });
 
@@ -146,7 +144,8 @@ app.get('/seasons', checkJwt, async (req, res) => {
     }
 });
 
-app.get('/episodes', checkJwt, async (req, res) => {
+app.get('/episodes', apiKeyMiddleware, checkJwt, async (req, res) => {
+    // ... (rest of the function is unchanged)
     const { seasonId } = req.query;
     if (!seasonId) return res.status(400).json({ error: 'seasonId is required.' });
     
@@ -168,7 +167,8 @@ app.get('/episodes', checkJwt, async (req, res) => {
     }
 });
 
-app.post('/download', checkJwt, (req, res) => {
+app.post('/download', apiKeyMiddleware, checkJwt, (req, res) => {
+    // ... (rest of the function is unchanged)
     const { streamUrl, downloadPath, title, refererUrl } = req.body;
     if (!streamUrl || !downloadPath || !title || !refererUrl) {
         return res.status(400).json({ error: 'streamUrl, downloadPath, title, and refererUrl are required.' });
@@ -197,6 +197,7 @@ app.post('/download', checkJwt, (req, res) => {
     
     res.status(202).json({ message: `Download started for "${title}". Check server logs for progress.` });
 });
+
 
 app.listen(config.PORT, () => {
     logger.info(`PlumeNest Personal API server is listening on http://localhost:${config.PORT}`);

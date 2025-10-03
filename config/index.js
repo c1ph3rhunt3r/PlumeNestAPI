@@ -6,6 +6,7 @@ const config = {
     AUTH0_ISSUER_BASE_URL: process.env.AUTH0_ISSUER_BASE_URL, // <-- ADD THIS
     AUTH0_AUDIENCE: process.env.AUTH0_AUDIENCE,             // <-- ADD THIS
     FMOVIES_BASE_URL: process.env.FMOVIES_BASE_URL || 'https://fmovies.ro',
+    API_SECRET_KEY: process.env.API_SECRET_KEY, 
     VIDEOSTR_BASE_URL: process.env.VIDEOSTR_BASE_URL || 'https://videostr.net',
     DECRYPTION_KEYS_URL: process.env.DECRYPTION_KEYS_URL || 'https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json',
     TMDB_API_KEY: process.env.TMDB_API_KEY,
