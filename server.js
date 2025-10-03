@@ -6,36 +6,27 @@ const config = require('./config');
 const logger = require('./config/logger');
 const { redisClient } = require('./services/cache');
 const fmoviesService = require('./services/fmovies');
-const tmdbService = require('./services/tmdb');
+const tmdbService =require('./services/tmdb');
 const streamService = require('./services/stream');
 const { auth } = require('express-oauth2-jwt-bearer');
 
 const app = express();
 
-// --- AUTH0 JWT CHECK MIDDLEWARE ---
+// --- AUTHENTICATION MIDDLEWARE ---
 const checkJwt = auth({
   audience: config.AUTH0_AUDIENCE,
   issuerBaseURL: config.AUTH0_ISSUER_BASE_URL,
 });
 
-// --- NEW API KEY CHECK MIDDLEWARE ---
 const apiKeyMiddleware = (req, res, next) => {
     const providedKey = req.header('X-API-KEY');
-
     if (!config.API_SECRET_KEY) {
-        logger.error("[FATAL] API_SECRET_KEY is not configured on the server. All requests will be blocked.");
-        return res.status(500).json({ error: 'Server configuration error: Missing API secret key.' });
+        logger.error("[FATAL] API_SECRET_KEY is not configured.");
+        return res.status(500).json({ error: 'Server configuration error.' });
     }
-
-    if (!providedKey) {
-        return res.status(401).json({ error: 'Unauthorized: Missing X-API-KEY header.' });
-    }
-
-    if (providedKey !== config.API_SECRET_KEY) {
+    if (!providedKey || providedKey !== config.API_SECRET_KEY) {
         return res.status(403).json({ error: 'Forbidden: Invalid API Key.' });
     }
-
-    // If the key is valid, proceed to the next middleware or route handler
     next();
 };
 
@@ -43,19 +34,33 @@ const apiKeyMiddleware = (req, res, next) => {
 app.use(cors());
 app.use(express.json());
 
-// --- API ENDPOINTS ---
+// --- PUBLIC API ENDPOINTS ---
 
-// This is a public endpoint that anyone can access (it does not use the middleware).
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
-// All routes defined below will be protected by BOTH the API Key and the Auth0 JWT.
-// The middlewares run in the order they are provided.
+app.get('/health', async (req, res) => {
+    try {
+        const redisPing = await redisClient.ping();
+        if (redisPing !== 'PONG') throw new Error('Redis did not respond correctly.');
+        res.status(200).json({ status: 'ok', dependencies: { redis: 'connected' } });
+    } catch (error) {
+        logger.error('Health check failed!', { message: error.message });
+        res.status(503).json({ status: 'error', dependencies: { redis: 'disconnected' }, error: error.message });
+    }
+});
 
-app.get('/search', apiKeyMiddleware, checkJwt, async (req, res) => {
-    logger.info(`Search request received from user: ${req.auth.payload.sub}`);
-    
+// --- API VERSION 1 ROUTER ---
+const apiV1Router = express.Router();
+
+// Apply the security middleware to all routes in this router
+apiV1Router.use(apiKeyMiddleware);
+apiV1Router.use(checkJwt);
+
+// Define all your existing endpoints on the v1 router
+apiV1Router.get('/search', async (req, res) => {
+    logger.info(`Search request from user: ${req.auth.payload.sub}`);
     const { title, type } = req.query;
-    if (!title) return res.status(400).json({ error: 'Title query parameter is required.' });
+    if (!title) return res.status(400).json({ error: 'Title is required.' });
 
     const cacheKey = `search-${type || 'any'}-${title.trim().toLowerCase()}`;
     const cachedString = await redisClient.get(cacheKey);
@@ -68,13 +73,12 @@ app.get('/search', apiKeyMiddleware, checkJwt, async (req, res) => {
     try {
         const fmoviesCandidates = await fmoviesService.searchContent(title);
         if (fmoviesCandidates.length === 0) return res.status(404).json({ error: 'Content not found.' });
-        
+
         const metadataPromises = fmoviesCandidates.map(c => tmdbService.getTmdbMetadata(c.title, c.type, c.year).then(d => ({ ...c, ...d })));
         const enrichedCandidates = await Promise.all(metadataPromises);
 
         let bestCombinedMatch = null;
         let bestScore = -1;
-
         for (const candidate of enrichedCandidates) {
             if (candidate.tmdbId) {
                 let currentScore = 0;
@@ -92,7 +96,7 @@ app.get('/search', apiKeyMiddleware, checkJwt, async (req, res) => {
             logger.warn('No strong match found, falling back to first result.');
             bestCombinedMatch = enrichedCandidates[0];
         }
-        
+
         bestCombinedMatch.id = bestCombinedMatch.fmoviesId;
         delete bestCombinedMatch.fmoviesId;
         
@@ -105,8 +109,8 @@ app.get('/search', apiKeyMiddleware, checkJwt, async (req, res) => {
     }
 });
 
-app.get('/stream', apiKeyMiddleware, checkJwt, async (req, res) => {
-    logger.info(`Stream request received from user: ${req.auth.payload.sub}`);
+apiV1Router.get('/stream', async (req, res) => {
+    logger.info(`Stream request from user: ${req.auth.payload.sub}`);
     const { id, type } = req.query;
     if (!id || !type) return res.status(400).json({ error: 'ID and type are required.' });
     if (type !== 'movie' && type !== 'tv') return res.status(400).json({ error: "Type must be 'movie' or 'tv'."});
@@ -115,23 +119,18 @@ app.get('/stream', apiKeyMiddleware, checkJwt, async (req, res) => {
         const streamData = await streamService.getStreamData(id, type);
         res.json(streamData);
     } catch (error) {
-        logger.error(`Error in /stream endpoint for ID ${id}`, { message: error.message });
+        logger.error(`Error in /stream for ID ${id}`, { message: error.message });
         res.status(500).json({ error: error.message });
     }
 });
 
-// Apply protection to the rest of the endpoints
-app.get('/seasons', apiKeyMiddleware, checkJwt, async (req, res) => {
-    // ... (rest of the function is unchanged)
+apiV1Router.get('/seasons', async (req, res) => {
     const { showId } = req.query;
     if (!showId) return res.status(400).json({ error: 'showId is required.' });
 
     const cacheKey = `seasons-${showId}`;
     const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) {
-        logger.info(`Cache HIT for seasons key: ${cacheKey}.`);
-        return res.json(JSON.parse(cachedString));
-    }
+    if (cachedString) return res.json(JSON.parse(cachedString));
 
     try {
         const seasons = await fmoviesService.getSeasons(showId);
@@ -144,17 +143,13 @@ app.get('/seasons', apiKeyMiddleware, checkJwt, async (req, res) => {
     }
 });
 
-app.get('/episodes', apiKeyMiddleware, checkJwt, async (req, res) => {
-    // ... (rest of the function is unchanged)
+apiV1Router.get('/episodes', async (req, res) => {
     const { seasonId } = req.query;
     if (!seasonId) return res.status(400).json({ error: 'seasonId is required.' });
     
     const cacheKey = `episodes-${seasonId}`;
     const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) {
-        logger.info(`Cache HIT for episodes key: ${cacheKey}.`);
-        return res.json(JSON.parse(cachedString));
-    }
+    if (cachedString) return res.json(JSON.parse(cachedString));
 
     try {
         const episodes = await fmoviesService.getEpisodes(seasonId);
@@ -167,11 +162,10 @@ app.get('/episodes', apiKeyMiddleware, checkJwt, async (req, res) => {
     }
 });
 
-app.post('/download', apiKeyMiddleware, checkJwt, (req, res) => {
-    // ... (rest of the function is unchanged)
+apiV1Router.post('/download', (req, res) => {
     const { streamUrl, downloadPath, title, refererUrl } = req.body;
     if (!streamUrl || !downloadPath || !title || !refererUrl) {
-        return res.status(400).json({ error: 'streamUrl, downloadPath, title, and refererUrl are required.' });
+        return res.status(400).json({ error: 'All download parameters are required.' });
     }
     const safeTitle = title.replace(/[^a-z0-9\-_\. ]/gi, '_');
     const outputPath = path.join(downloadPath, `${safeTitle}.mp4`);
@@ -188,17 +182,17 @@ app.post('/download', apiKeyMiddleware, checkJwt, (req, res) => {
     const ytdlp = spawn('yt-dlp', args);
     
     logger.info(`--- New Download Request: ${title} ---`, { args });
-
     ytdlp.stdout.on('data', (data) => logger.info(`[yt-dlp] ${data.toString().trim()}`));
     ytdlp.stderr.on('data', (data) => logger.error(`[yt-dlp ERROR] ${data.toString().trim()}`));
-    ytdlp.on('close', (code) => {
-        logger.info(`Download for "${title}" finished with code ${code}.`);
-    });
+    ytdlp.on('close', (code) => logger.info(`Download for "${title}" finished with code ${code}.`));
     
-    res.status(202).json({ message: `Download started for "${title}". Check server logs for progress.` });
+    res.status(202).json({ message: `Download started for "${title}".` });
 });
 
+// Mount the versioned router to the main app
+app.use('/api/v1', apiV1Router);
 
+// --- START SERVER ---
 app.listen(config.PORT, () => {
     logger.info(`PlumeNest Personal API server is listening on http://localhost:${config.PORT}`);
 });
