@@ -118,6 +118,73 @@ apiV1Router.post('/users/sync', syncUserMiddleware, async (req, res) => {
     res.status(200).json({ status: 'synced', user: req.user });
 });
 
+// --- NEW SEARCH ENDPOINT (USER CHOICE MODEL) ---
+apiV1Router.get('/search', async (req, res) => {
+    logger.info(`Search request from user: ${req.auth.payload.sub}`);
+    const { title } = req.query;
+    if (!title) return res.status(400).json({ error: 'Title query parameter is required.' });
+
+    const cacheKey = `search-list-${title.trim().toLowerCase()}`;
+    const cachedString = await redisClient.get(cacheKey);
+    if (cachedString) {
+        logger.info(`Cache HIT for search list key: ${cacheKey}.`);
+        return res.json(JSON.parse(cachedString));
+    }
+    logger.info(`Cache MISS for search list key: ${cacheKey}.`);
+
+    try {
+        // Step 1: Get the raw list of candidates, now including poster URLs.
+        const searchResults = await fmoviesService.searchContent(title);
+        if (searchResults.length === 0) {
+            return res.status(404).json({ error: 'Content not found.' });
+        }
+        
+        // Step 2: Cache and return the entire list.
+        await redisClient.set(cacheKey, JSON.stringify(searchResults), { EX: 86400 }); // Cache for 24 hours
+        logger.info(`[SUCCESS] Found ${searchResults.length} candidates for "${title}".`);
+        res.json(searchResults);
+
+    } catch (error) {
+        logger.error('Error in /search endpoint', { message: error.message, stack: error.stack });
+        res.status(500).json({ error: 'An internal server error occurred during search.' });
+    }
+});
+
+// --- NEW METADATA ENDPOINT ---
+apiV1Router.get('/metadata', async (req, res) => {
+    logger.info(`Metadata request from user: ${req.auth.payload.sub}`);
+    const { id, url } = req.query; // Expecting the fmovies ID and the fmovies URL
+    if (!id || !url) return res.status(400).json({ error: 'fmovies ID and URL are required.' });
+
+    const cacheKey = `metadata-${id}`;
+    const cachedString = await redisClient.get(cacheKey);
+    if (cachedString) {
+        logger.info(`Cache HIT for metadata key: ${cacheKey}.`);
+        return res.json(JSON.parse(cachedString));
+    }
+    logger.info(`Cache MISS for metadata key: ${cacheKey}.`);
+
+    try {
+        // Step 1: Get fmovies-specific metadata (like overview)
+        const fmoviesData = await fmoviesService.getMetadata(id, url);
+
+        // Step 2 (Optional but recommended): Get official TMDb metadata for IDs
+        // We'll skip this for now to keep it simple, but this is where you would call tmdbService
+        // const tmdbData = await tmdbService.getTmdbMetadata(title, type, year);
+
+        // For now, we only return the overview.
+        const finalMetadata = { ...fmoviesData };
+        
+        await redisClient.set(cacheKey, JSON.stringify(finalMetadata), { EX: 86400 });
+        logger.info(`[SUCCESS] Fetched metadata for ID: ${id}`);
+        res.json(finalMetadata);
+
+    } catch (error) {
+        logger.error(`Error in /metadata endpoint for ID ${id}`, { message: error.message, stack: error.stack });
+        res.status(500).json({ error: 'An internal server error occurred while fetching metadata.' });
+    }
+});
+
 
 // --- CORE API ENDPOINTS ---
 // These endpoints now assume the user has already been synced via the dedicated endpoint.

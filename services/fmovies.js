@@ -1,11 +1,9 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
-// Import the randomizer function and base headers
 const { FMOVIES_BASE_URL, BROWSER_HEADERS, getRandomUserAgent } = require('../config');
 const selectors = require('../config/selectors.json');
 const logger = require('../config/logger');
 
-// Helper to create fresh headers for each request
 const getHeaders = () => ({
     ...BROWSER_HEADERS,
     'User-Agent': getRandomUserAgent(),
@@ -15,23 +13,30 @@ async function searchContent(title) {
     const formattedTitle = title.trim().toLowerCase().replace(/\s+/g, '-');
     const searchUrl = `${FMOVIES_BASE_URL}/search/${formattedTitle}`;
     logger.info(`Searching fmovies: ${searchUrl}`);
-    // Use the getHeaders() helper for the request
     const response = await axios.get(searchUrl, { headers: getHeaders() });
     const $ = cheerio.load(response.data);
 
     const candidates = [];
     $(selectors.fmovies.search.item).each((i, el) => {
-        const itemTitle = $(el).find(selectors.fmovies.search.title).attr('title');
-        const itemHref = $(el).find(selectors.fmovies.search.title).attr('href');
+        const titleElement = $(el).find(selectors.fmovies.search.title);
+        const itemTitle = titleElement.attr('title');
+        const itemHref = titleElement.attr('href');
         const itemType = $(el).find(selectors.fmovies.search.type).text().toLowerCase();
         const itemYear = $(el).find(selectors.fmovies.search.year).first().text();
+        
+        // --- NEW: Scrape the poster URL ---
+        const posterUrl = $(el).find('img').attr('data-src');
 
         if (itemTitle && itemHref) {
             const match = itemHref.match(/-(\d+)$/);
             if (match && match[1]) {
                 candidates.push({
-                    fmoviesId: match[1], title: itemTitle, type: itemType,
-                    year: itemType === 'movie' ? itemYear : null, href: itemHref
+                    id: match[1], // Use 'id' consistently
+                    title: itemTitle,
+                    type: itemType,
+                    year: itemType === 'movie' ? itemYear : null,
+                    href: `${FMOVIES_BASE_URL}${itemHref}`,
+                    posterUrl: posterUrl
                 });
             }
         }
@@ -40,7 +45,22 @@ async function searchContent(title) {
     return candidates;
 }
 
+// --- NEW FUNCTION TO GET DETAILED METADATA ---
+async function getMetadata(fmoviesId, fmoviesUrl) {
+    logger.info(`Fetching metadata for fmovies ID: ${fmoviesId}`);
+    const response = await axios.get(fmoviesUrl, { headers: getHeaders() });
+    const $ = cheerio.load(response.data);
+
+    const overview = $('.description').text().trim();
+    // In the future, you could also scrape the TMDb ID if it's available on this page
+    // const tmdbId = ...
+
+    return { overview };
+}
+
+
 async function getSeasons(showId) {
+    // ... (this function remains unchanged)
     const seasonListHtml = await axios.get(`${FMOVIES_BASE_URL}/ajax/season/list/${showId}`, { headers: getHeaders() });
     const $ = cheerio.load(seasonListHtml.data);
     const seasons = [];
@@ -54,6 +74,7 @@ async function getSeasons(showId) {
 }
 
 async function getEpisodes(seasonId) {
+    // ... (this function remains unchanged)
     const episodeListHtml = await axios.get(`${FMOVIES_BASE_URL}/ajax/season/episodes/${seasonId}`, { headers: getHeaders() });
     const $ = cheerio.load(episodeListHtml.data);
     const episodes = [];
@@ -67,6 +88,7 @@ async function getEpisodes(seasonId) {
 }
 
 async function getServers(id, type) {
+    // ... (this function remains unchanged)
     const serverListUrl = type === 'movie'
         ? `${FMOVIES_BASE_URL}/ajax/episode/list/${id}`
         : `${FMOVIES_BASE_URL}/ajax/episode/servers/${id}`;
@@ -81,4 +103,4 @@ async function getServers(id, type) {
     return servers;
 }
 
-module.exports = { searchContent, getSeasons, getEpisodes, getServers };
+module.exports = { searchContent, getMetadata, getSeasons, getEpisodes, getServers };
