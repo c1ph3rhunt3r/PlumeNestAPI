@@ -24,13 +24,20 @@ FMOVIES_BASE_URL: 'https://fmovies.ro',
 VIDEOSTR_BASE_URL: 'https://videostr.net',
 DECRYPTION_KEYS_URL: 'https://raw.githubusercontent.com/yogesh-hacker/MegacloudKeys/refs/heads/main/keys.json',
 TMDB_API_KEY: process.env.TMDB_API_KEY,
-// The base headers, User-Agent will be overridden on each request
-BROWSER_HEADERS: {
-'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,/;q=0.8',
-'Accept-Language': 'en-US,en;q=0.9',
-'Referer': 'https://fmovies.ro/',
+
+// --- ADD THIS NEW SECTION ---
+FALLBACK_DECRYPTION_KEYS: {
+    "mega": "nTAygRRNLS3wo82OtMyfPrWgD9K2UIvcwlj",
+    "vidstr": "nTAygRRNLS3wo82OtMyfPrWgD9K2UIvcwlj",
+    "rabbit": "3AlttPAF1Zwn2l63meMeGMIvlWOXgm9ZXNk3glEzLTGOr1F113"
 },
-// Export the helper function so other modules can use it
+// --- END NEW SECTION ---
+
+BROWSER_HEADERS: {
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://fmovies.ro/',
+},
 getRandomUserAgent,
 };
 module.exports = config;
