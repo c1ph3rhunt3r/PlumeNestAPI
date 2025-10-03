@@ -6,7 +6,7 @@ const { redisClient } = require('./services/cache');
 const fmoviesService = require('./services/fmovies');
 const tmdbService = require('./services/tmdb');
 const streamService = require('./services/stream');
-const supabase = require('./services/database');
+const supabase = require('./services/database'); // Import the Supabase client
 const { auth } = require('express-oauth2-jwt-bearer');
 
 const app = express();
@@ -28,6 +28,54 @@ const apiKeyMiddleware = (req, res, next) => {
     }
     next();
 };
+
+// --- NEW USER SYNC MIDDLEWARE ---
+// This middleware runs AFTER checkJwt and attaches our internal user profile to the request.
+const syncUserMiddleware = async (req, res, next) => {
+    // 'sub' is the standard field for the unique user ID in a JWT payload
+    const auth0UserId = req.auth.payload.sub;
+    if (!auth0UserId) {
+        return res.status(400).json({ error: 'User ID not found in authentication token.' });
+    }
+
+    try {
+        // Check if the user already exists in our Supabase 'users' table
+        let { data: user, error: selectError } = await supabase
+            .from('users')
+            .select('id, auth0_user_id') // Only select the columns you need
+            .eq('auth0_user_id', auth0UserId)
+            .single();
+
+        // Supabase returns an error if no rows are found, which is expected for new users.
+        // We only throw if it's a real database error.
+        if (selectError && selectError.code !== 'PGRST116') { // PGRST116 = "Query returned 0 rows"
+            throw selectError;
+        }
+
+        // If the user doesn't exist, create a new profile for them
+        if (!user) {
+            logger.info(`New user detected. Creating profile for auth0_user_id: ${auth0UserId}`);
+            const { data: newUser, error: insertError } = await supabase
+                .from('users')
+                .insert([{ auth0_user_id: auth0UserId }])
+                .select('id, auth0_user_id')
+                .single();
+            
+            if (insertError) throw insertError;
+            user = newUser; // Use the newly created user record
+        }
+
+        // Attach our internal user record (from Supabase) to the request object.
+        // All subsequent endpoints will now have access to `req.user`.
+        req.user = user;
+        next();
+
+    } catch (error) {
+        logger.error('Failed to sync user with Supabase database', { auth0_id: auth0UserId, message: error.message });
+        return res.status(500).json({ error: 'Database user synchronization failed.' });
+    }
+};
+
 
 // --- MIDDLEWARE SETUP ---
 app.use(cors());
@@ -59,50 +107,23 @@ app.get('/health', async (req, res) => {
 // --- API VERSION 1 ROUTER ---
 const apiV1Router = express.Router();
 
-// Apply the security middleware to all v1 routes
+// Apply the security middleware in the correct order for all v1 routes
 apiV1Router.use(apiKeyMiddleware);
 apiV1Router.use(checkJwt);
+// The sync middleware is NOT applied globally. We will add it to specific endpoints.
 
-// --- NEW DEDICATED USER SYNC ENDPOINT ---
-apiV1Router.post('/users/sync', async (req, res) => {
-    const auth0UserId = req.auth.payload.sub;
-    logger.info(`Sync request received for Auth0 ID: ${auth0UserId}`);
-
-    try {
-        let { data: user, error: selectError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('auth0_user_id', auth0UserId)
-            .single();
-
-        if (selectError && selectError.code !== 'PGRST116') { // Ignore "0 rows" error
-            throw selectError;
-        }
-
-        if (!user) {
-            logger.info(`User not found. Creating new profile for Auth0 ID: ${auth0UserId}`);
-            const { data: newUser, error: insertError } = await supabase
-                .from('users')
-                .insert([{ auth0_user_id: auth0UserId }])
-                .select()
-                .single();
-            
-            if (insertError) throw insertError;
-            user = newUser;
-            res.status(201).json({ status: 'created', user });
-        } else {
-            logger.info(`User already exists. Profile sync successful for Auth0 ID: ${auth0UserId}`);
-            res.status(200).json({ status: 'ok', user });
-        }
-    } catch (error) {
-        logger.error('Failed to sync user with database', { auth0_id: auth0UserId, message: error.message });
-        res.status(500).json({ error: 'Database user synchronization failed.' });
-    }
+// --- USER MANAGEMENT ENDPOINT ---
+// This is the dedicated endpoint for the client to call after login.
+apiV1Router.post('/users/sync', syncUserMiddleware, async (req, res) => {
+    // The middleware has already done the work. We just return the user object.
+    logger.info(`Sync successful for user ID: ${req.user.id}`);
+    res.status(200).json({ status: 'synced', user: req.user });
 });
 
+
 // --- CORE API ENDPOINTS ---
-// The user sync middleware has been removed from here.
-// These endpoints now assume the user has already been synced.
+// These endpoints now assume the user has already been synced via the dedicated endpoint.
+// We can log the user ID for context, but we don't need to sync on every call.
 
 apiV1Router.get('/search', async (req, res) => {
     logger.info(`Search request from user: ${req.auth.payload.sub}`);
@@ -118,7 +139,6 @@ apiV1Router.get('/search', async (req, res) => {
     
     try {
         const fmoviesCandidates = await fmoviesService.searchContent(title);
-        // ... (rest of the search logic is unchanged)
         if (fmoviesCandidates.length === 0) return res.status(404).json({ error: 'Content not found.' });
         const metadataPromises = fmoviesCandidates.map(c => tmdbService.getTmdbMetadata(c.title, c.type, c.year).then(d => ({ ...c, ...d })));
         const enrichedCandidates = await Promise.all(metadataPromises);
