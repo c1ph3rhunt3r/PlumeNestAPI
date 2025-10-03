@@ -3,11 +3,11 @@ const cors = require('cors');
 const config = require('./config');
 const logger = require('./config/logger');
 const { redisClient } = require('./services/cache');
-const fmoviesService = require('./services/fmovies');
-const tmdbService = require('./services/tmdb');
-const streamService = require('./services/stream');
-const supabase = require('./services/database'); // Import the Supabase client
 const { auth } = require('express-oauth2-jwt-bearer');
+
+// --- IMPORT ROUTE FILES ---
+const contentRoutes = require('./routes/content');
+const userRoutes = require('./routes/users');
 
 const app = express();
 
@@ -29,53 +29,7 @@ const apiKeyMiddleware = (req, res, next) => {
     next();
 };
 
-// --- UPDATED USER SYNC MIDDLEWARE ---
-const syncUserMiddleware = async (req, res, next) => {
-    const auth0UserId = req.auth.payload.sub;
-    if (!auth0UserId) {
-        return res.status(400).json({ error: 'User ID not found in token.' });
-    }
-
-    try {
-        // Check if user exists. We will NOT use .single() here to avoid the 406 error.
-        let { data: users, error: selectError } = await supabase
-            .from('users')
-            .select('id, auth0_user_id')
-            .eq('auth0_user_id', auth0UserId);
-
-        if (selectError) {
-            throw selectError; // Let the catch block handle any real DB errors
-        }
-
-        let user = users && users.length > 0 ? users[0] : null;
-
-        if (!user) {
-            logger.info(`New user detected. Creating profile for auth0_user_id: ${auth0UserId}`);
-            const { data: newUser, error: insertError } = await supabase
-                .from('users')
-                .insert([{ auth0_user_id: auth0UserId }])
-                .select('id, auth0_user_id')
-                .single(); // .single() is safe here because we know we just inserted one row.
-            
-            if (insertError) throw insertError;
-            user = newUser;
-        }
-
-        req.user = user;
-        next();
-
-    } catch (error) {
-        logger.error('Failed to sync user with Supabase database', { 
-            auth0_id: auth0UserId, 
-            message: error.message,
-            details: error.details // Include Supabase-specific details if available
-        });
-        return res.status(500).json({ error: 'Database user synchronization failed.' });
-    }
-};
-
-
-// --- MIDDLEWARE SETUP ---
+// --- GLOBAL MIDDLEWARE SETUP ---
 app.use(cors());
 app.use(express.json());
 
@@ -84,13 +38,12 @@ app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
 const timeout = (ms, promise) => {
     return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            reject(new Error(`Operation timed out after ${ms}ms`));
-        }, ms);
+        const timer = setTimeout(() => { reject(new Error(`Operation timed out after ${ms}ms`)); }, ms);
         promise.then(value => { clearTimeout(timer); resolve(value); })
                .catch(reason => { clearTimeout(timer); reject(reason); });
     });
 };
+
 app.get('/health', async (req, res) => {
     try {
         const redisPing = await timeout(2000, redisClient.ping());
@@ -102,194 +55,18 @@ app.get('/health', async (req, res) => {
     }
 });
 
-// --- API VERSION 1 ROUTER ---
+// --- MOUNT THE VERSION 1 ROUTER ---
 const apiV1Router = express.Router();
 
-// Apply the security middleware in the correct order for all v1 routes
+// Apply security middleware to the entire v1 router
 apiV1Router.use(apiKeyMiddleware);
 apiV1Router.use(checkJwt);
-// The sync middleware is NOT applied globally. We will add it to specific endpoints.
 
-// --- USER MANAGEMENT ENDPOINT ---
-// This is the dedicated endpoint for the client to call after login.
-apiV1Router.post('/users/sync', syncUserMiddleware, async (req, res) => {
-    // The middleware has already done the work. We just return the user object.
-    logger.info(`Sync successful for user ID: ${req.user.id}`);
-    res.status(200).json({ status: 'synced', user: req.user });
-});
+// Use the imported route files
+apiV1Router.use('/', contentRoutes); // Mounts /search, /stream, etc.
+apiV1Router.use('/users', userRoutes); // Mounts /users/sync
 
-// --- NEW SEARCH ENDPOINT (USER CHOICE MODEL) ---
-apiV1Router.get('/search', async (req, res) => {
-    logger.info(`Search request from user: ${req.auth.payload.sub}`);
-    const { title } = req.query;
-    if (!title) return res.status(400).json({ error: 'Title query parameter is required.' });
-
-    const cacheKey = `search-list-${title.trim().toLowerCase()}`;
-    const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) {
-        logger.info(`Cache HIT for search list key: ${cacheKey}.`);
-        return res.json(JSON.parse(cachedString));
-    }
-    logger.info(`Cache MISS for search list key: ${cacheKey}.`);
-
-    try {
-        // Step 1: Get the raw list of candidates, now including poster URLs.
-        const searchResults = await fmoviesService.searchContent(title);
-        if (searchResults.length === 0) {
-            return res.status(404).json({ error: 'Content not found.' });
-        }
-        
-        // Step 2: Cache and return the entire list.
-        await redisClient.set(cacheKey, JSON.stringify(searchResults), { EX: 86400 }); // Cache for 24 hours
-        logger.info(`[SUCCESS] Found ${searchResults.length} candidates for "${title}".`);
-        res.json(searchResults);
-
-    } catch (error) {
-        logger.error('Error in /search endpoint', { message: error.message, stack: error.stack });
-        res.status(500).json({ error: 'An internal server error occurred during search.' });
-    }
-});
-
-// --- NEW METADATA ENDPOINT ---
-apiV1Router.get('/metadata', async (req, res) => {
-    logger.info(`Metadata request from user: ${req.auth.payload.sub}`);
-    const { id, url } = req.query; // Expecting the fmovies ID and the fmovies URL
-    if (!id || !url) return res.status(400).json({ error: 'fmovies ID and URL are required.' });
-
-    const cacheKey = `metadata-${id}`;
-    const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) {
-        logger.info(`Cache HIT for metadata key: ${cacheKey}.`);
-        return res.json(JSON.parse(cachedString));
-    }
-    logger.info(`Cache MISS for metadata key: ${cacheKey}.`);
-
-    try {
-        // Step 1: Get fmovies-specific metadata (like overview)
-        const fmoviesData = await fmoviesService.getMetadata(id, url);
-
-        // Step 2 (Optional but recommended): Get official TMDb metadata for IDs
-        // We'll skip this for now to keep it simple, but this is where you would call tmdbService
-        // const tmdbData = await tmdbService.getTmdbMetadata(title, type, year);
-
-        // For now, we only return the overview.
-        const finalMetadata = { ...fmoviesData };
-        
-        await redisClient.set(cacheKey, JSON.stringify(finalMetadata), { EX: 86400 });
-        logger.info(`[SUCCESS] Fetched metadata for ID: ${id}`);
-        res.json(finalMetadata);
-
-    } catch (error) {
-        logger.error(`Error in /metadata endpoint for ID ${id}`, { message: error.message, stack: error.stack });
-        res.status(500).json({ error: 'An internal server error occurred while fetching metadata.' });
-    }
-});
-
-
-// --- CORE API ENDPOINTS ---
-// These endpoints now assume the user has already been synced via the dedicated endpoint.
-// We can log the user ID for context, but we don't need to sync on every call.
-
-apiV1Router.get('/search', async (req, res) => {
-    logger.info(`Search request from user: ${req.auth.payload.sub}`);
-    const { title, type } = req.query;
-    if (!title) return res.status(400).json({ error: 'Title is required.' });
-
-    const cacheKey = `search-${type || 'any'}-${title.trim().toLowerCase()}`;
-    const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) {
-        logger.info(`Cache HIT for search key: ${cacheKey}.`);
-        return res.json(JSON.parse(cachedString));
-    }
-    
-    try {
-        const fmoviesCandidates = await fmoviesService.searchContent(title);
-        if (fmoviesCandidates.length === 0) return res.status(404).json({ error: 'Content not found.' });
-        const metadataPromises = fmoviesCandidates.map(c => tmdbService.getTmdbMetadata(c.title, c.type, c.year).then(d => ({ ...c, ...d })));
-        const enrichedCandidates = await Promise.all(metadataPromises);
-
-        let bestCombinedMatch = null;
-        let bestScore = -1;
-        for (const candidate of enrichedCandidates) {
-            if (candidate.tmdbId) {
-                let currentScore = 0;
-                if (candidate.title.toLowerCase() === title.toLowerCase()) currentScore += 10;
-                if (type && candidate.type === type.toLowerCase()) currentScore += 5;
-                currentScore += 1;
-                if (currentScore > bestScore) {
-                    bestScore = currentScore;
-                    bestCombinedMatch = candidate;
-                }
-            }
-        }
-
-        if (!bestCombinedMatch) {
-            logger.warn('No strong match found, falling back to first result.');
-            bestCombinedMatch = enrichedCandidates[0];
-        }
-
-        bestCombinedMatch.id = bestCombinedMatch.fmoviesId;
-        delete bestCombinedMatch.fmoviesId;
-        
-        await redisClient.set(cacheKey, JSON.stringify(bestCombinedMatch), { EX: 86400 });
-        res.json(bestCombinedMatch);
-    } catch (error) {
-        logger.error('Error in /search endpoint', { message: error.message, stack: error.stack });
-        res.status(500).json({ error: 'An internal server error occurred.' });
-    }
-});
-
-apiV1Router.get('/stream', async (req, res) => {
-    logger.info(`Stream request from user: ${req.auth.payload.sub}`);
-    const { id, type } = req.query;
-    if (!id || !type) return res.status(400).json({ error: 'ID and type are required.' });
-    
-    try {
-        const streamData = await streamService.getStreamData(id, type);
-        res.json(streamData);
-    } catch (error) {
-        logger.error(`Error in /stream for ID ${id}`, { message: error.message });
-        res.status(500).json({ error: error.message });
-    }
-});
-
-apiV1Router.get('/seasons', async (req, res) => {
-    const { showId } = req.query;
-    if (!showId) return res.status(400).json({ error: 'showId is required.' });
-
-    const cacheKey = `seasons-${showId}`;
-    const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) return res.json(JSON.parse(cachedString));
-
-    try {
-        const seasons = await fmoviesService.getSeasons(showId);
-        await redisClient.set(cacheKey, JSON.stringify(seasons), { EX: 86400 });
-        res.json(seasons);
-    } catch (error) {
-        logger.error(`Error in /seasons for showId ${showId}`, { message: error.message });
-        res.status(500).json({ error: 'Failed to fetch seasons.' });
-    }
-});
-
-apiV1Router.get('/episodes', async (req, res) => {
-    const { seasonId } = req.query;
-    if (!seasonId) return res.status(400).json({ error: 'seasonId is required.' });
-    
-    const cacheKey = `episodes-${seasonId}`;
-    const cachedString = await redisClient.get(cacheKey);
-    if (cachedString) return res.json(JSON.parse(cachedString));
-
-    try {
-        const episodes = await fmoviesService.getEpisodes(seasonId);
-        await redisClient.set(cacheKey, JSON.stringify(episodes), { EX: 86400 });
-        res.json(episodes);
-    } catch (error) {
-        logger.error(`Error in /episodes for seasonId ${seasonId}`, { message: error.message });
-        res.status(500).json({ error: 'Failed to fetch episodes.' });
-    }
-});
-
-// Mount the versioned router to the main app
+// Mount the main v1 router to the app
 app.use('/api/v1', apiV1Router);
 
 // --- START SERVER ---
