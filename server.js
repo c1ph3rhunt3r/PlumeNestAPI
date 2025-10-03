@@ -38,14 +38,54 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.send('PlumeNest Personal API is running!'));
 
+// --- UPDATED /health ENDPOINT WITH TIMEOUT ---
+
+// Helper function that creates a promise that rejects after a specified time
+const timeout = (ms, promise) => {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            reject(new Error(`Operation timed out after ${ms}ms`));
+        }, ms);
+
+        promise
+            .then(value => {
+                clearTimeout(timer);
+                resolve(value);
+            })
+            .catch(reason => {
+                clearTimeout(timer);
+                reject(reason);
+            });
+    });
+};
+
 app.get('/health', async (req, res) => {
     try {
-        const redisPing = await redisClient.ping();
-        if (redisPing !== 'PONG') throw new Error('Redis did not respond correctly.');
-        res.status(200).json({ status: 'ok', dependencies: { redis: 'connected' } });
+        // We will now "race" the Redis ping against a 2-second timeout.
+        logger.info('Performing health check...');
+        const redisPing = await timeout(2000, redisClient.ping()); // 2000ms = 2 seconds
+
+        if (redisPing !== 'PONG') {
+            throw new Error('Redis did not respond with PONG.');
+        }
+
+        logger.info('Health check successful.');
+        res.status(200).json({
+            status: 'ok',
+            dependencies: {
+                redis: 'connected'
+            },
+            timestamp: new Date().toISOString()
+        });
     } catch (error) {
         logger.error('Health check failed!', { message: error.message });
-        res.status(503).json({ status: 'error', dependencies: { redis: 'disconnected' }, error: error.message });
+        res.status(503).json({
+            status: 'error',
+            dependencies: {
+                redis: 'disconnected'
+            },
+            error: error.message
+        });
     }
 });
 

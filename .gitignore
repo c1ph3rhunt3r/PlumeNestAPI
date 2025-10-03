@@ -7,4 +7,4 @@ misc
 dist
 *.png
 *.log
-reqs.txt
+req.txt
