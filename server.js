@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
-const { spawn } = require('child_process');
-const path = require('path');
+// const { spawn } = require('child_process'); <--- REMOVED
+// const path = require('path'); <--- REMOVED
 const config = require('./config');
 const logger = require('./config/logger');
 const { redisClient } = require('./services/cache');
@@ -52,11 +52,9 @@ app.get('/health', async (req, res) => {
 // --- API VERSION 1 ROUTER ---
 const apiV1Router = express.Router();
 
-// Apply the security middleware to all routes in this router
 apiV1Router.use(apiKeyMiddleware);
 apiV1Router.use(checkJwt);
 
-// Define all your existing endpoints on the v1 router
 apiV1Router.get('/search', async (req, res) => {
     logger.info(`Search request from user: ${req.auth.payload.sub}`);
     const { title, type } = req.query;
@@ -162,32 +160,7 @@ apiV1Router.get('/episodes', async (req, res) => {
     }
 });
 
-apiV1Router.post('/download', (req, res) => {
-    const { streamUrl, downloadPath, title, refererUrl } = req.body;
-    if (!streamUrl || !downloadPath || !title || !refererUrl) {
-        return res.status(400).json({ error: 'All download parameters are required.' });
-    }
-    const safeTitle = title.replace(/[^a-z0-9\-_\. ]/gi, '_');
-    const outputPath = path.join(downloadPath, `${safeTitle}.mp4`);
-    
-    const args = [
-        '--referer', refererUrl,
-        '--user-agent', config.BROWSER_HEADERS['User-Agent'],
-        '-f', 'best',
-        '--allow-unplayable-formats',
-        '-o', outputPath,
-        streamUrl
-    ];
-    
-    const ytdlp = spawn('yt-dlp', args);
-    
-    logger.info(`--- New Download Request: ${title} ---`, { args });
-    ytdlp.stdout.on('data', (data) => logger.info(`[yt-dlp] ${data.toString().trim()}`));
-    ytdlp.stderr.on('data', (data) => logger.error(`[yt-dlp ERROR] ${data.toString().trim()}`));
-    ytdlp.on('close', (code) => logger.info(`Download for "${title}" finished with code ${code}.`));
-    
-    res.status(202).json({ message: `Download started for "${title}".` });
-});
+// --- THE /download ENDPOINT HAS BEEN REMOVED ---
 
 // Mount the versioned router to the main app
 app.use('/api/v1', apiV1Router);
