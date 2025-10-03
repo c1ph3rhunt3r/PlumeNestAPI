@@ -1,26 +1,28 @@
 # PlumeNest API
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-stable-green.svg)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey.svg)
 
 ## Overview
 
-PlumeNest API is a private, high-performance web service designed to find and provide direct streamable and downloadable links for movies and TV shows. It is built with a robust, modular architecture in Node.js and Express, featuring a hybrid scraping engine, persistent caching with Redis, and a two-layer security model.
+PlumeNest API is a private, high-performance web service designed to find and provide direct streamable and downloadable links for movies and TV shows. It is built with a robust, modular architecture in Node.js and Express, featuring a lean scraping engine, persistent caching with Redis, and a full user authentication and database synchronization system.
 
-The primary purpose of this API is to serve as a backend for a desktop application, providing all the necessary data for a rich user experience, including metadata, subtitles, and direct M3U8 video source URLs.
+The primary purpose of this API is to serve as a complete backend for a desktop application, providing all the necessary data and user management features for a rich experience.
 
 ## Core Features
 
--   **Comprehensive Search**: Scrapes fmovies.ro for content and enriches it with metadata from The Movie Database (TMDb) using a parallelized, high-performance matching system.
--   **Robust Stream Fetching**: Utilizes a lean, fast scraping method to extract direct stream URLs, bypassing complex anti-bot measures.
--   **Persistent Caching**: Integrates with Redis to cache all API responses (search, streams, seasons, episodes), dramatically reducing response times and protecting against rate-limiting.
--   **Professional Security**: Implements a two-layer authentication system:
+-   **Fast Provider Search**: Scrapes fmovies.ro to generate a list of all available content candidates for a given title, including posters, years, and types, allowing the client to display a full results page.
+-   **Lazy-Loaded Metadata**: Provides a dedicated endpoint to fetch detailed metadata (like plot overviews) on-demand for a specific item.
+-   **Robust Stream Fetching**: Utilizes a lean, fast scraping method to extract direct M3U8 stream URLs, subtitles, and necessary headers.
+-   **Persistent Caching**: Integrates with Redis to cache all API responses, dramatically reducing response times and protecting against rate-limiting.
+-   **Professional Security & User Management**:
     1.  **Global API Key (`X-API-KEY`)**: Protects the entire service from unauthorized client applications.
-    2.  **User-Level JWTs (Auth0)**: Secures endpoints on a per-user basis, managed by Auth0 for industry-standard security.
--   **Modular & Maintainable**: The codebase is organized into logical services (scraping, database, caching) and uses external configuration for selectors, making it easy to update and maintain.
--   **Health & Monitoring**: Includes a public `/health` endpoint to monitor the API's status and its connection to critical dependencies like Redis.
--   **API Versioning**: All protected routes are versioned under `/api/v1` to ensure long-term compatibility with client applications.
+    2.  **User Authentication (Auth0)**: Manages user login and registration via Auth0 for industry-standard security.
+    3.  **Database Integration (Supabase)**: Automatically syncs authenticated users to a persistent Supabase database via a dedicated endpoint.
+-   **Modular & Maintainable**: The codebase is organized into logical services and uses external configuration for selectors.
+-   **Health & Monitoring**: Includes a public `/health` endpoint to monitor the API's status and its connection to critical dependencies.
+-   **API Versioning**: All protected routes are versioned under `/api/v1` to ensure long-term compatibility.
 
 ---
 
@@ -28,7 +30,8 @@ The primary purpose of this API is to serve as a backend for a desktop applicati
 
 The project is organized into a modular structure for clarity and separation of concerns.
 
-```/PlumeNestAPI
+```
+/PlumeNestAPI
 |-- /config/             # All configuration files
 |   |-- index.js         # Loads and exports all config variables
 |   |-- logger.js        # Winston logger configuration
@@ -36,6 +39,7 @@ The project is organized into a modular structure for clarity and separation of 
 |
 |-- /services/           # Core business logic
 |   |-- cache.js         # Redis client initialization
+|   |-- database.js      # Supabase client initialization
 |   |-- fmovies.js       # Logic for scraping fmovies.ro
 |   |-- stream.js        # Core logic for fetching stream/subtitle URLs
 |   |-- tmdb.js          # Logic for fetching data from TMDb
@@ -56,25 +60,25 @@ The project is organized into a modular structure for clarity and separation of 
 ### Prerequisites
 
 -   [Node.js](https://nodejs.org/) (v18.x or higher recommended)
--   An active [Redis](https://redis.io/) instance (e.g., from [Render](https://render.com))
+-   An active [Redis](https://redis.io/) instance
 -   An [Auth0](https://auth0.com/) account
+-   A [Supabase](https://supabase.com/) project
 -   A [TMDb](https://www.themoviedb.org/signup) API Key
 
 ### Installation & Setup
 
-1.  **Clone the repository:**
+1.  **Clone the repository and install dependencies:**
     ```bash
     git clone <your-repo-url>
     cd PlumeNestAPI
-    ```
-
-2.  **Install dependencies:**
-    ```bash
     npm install
     ```
 
+2.  **Set up the Supabase `users` table:**
+    In your Supabase dashboard, create a table named `users` with at least an `id` (primary key), `auth0_user_id` (text, unique), and `created_at` (timestamptz). Enable Row Level Security (RLS) and create policies that allow `anon` users to `INSERT` and `SELECT`.
+
 3.  **Create the `.env` file:**
-    Create a `.env` file in the root of the project. This file stores your secret keys and environment-specific configuration. Copy the contents of `.env.example` (if you have one) or use the template below.
+    Create a `.env` file in the root of the project with the following variables:
 
     ```env
     # Server Configuration
@@ -83,6 +87,8 @@ The project is organized into a modular structure for clarity and separation of 
     # External Services
     TMDB_API_KEY=your_tmdb_api_key_here
     REDIS_URL=your_redis_connection_string_here
+    SUPABASE_URL=https://your-project-url.supabase.co
+    SUPABASE_ANON_KEY=your_long_anon_public_key_here
 
     # Security
     API_SECRET_KEY=generate_a_long_random_string_for_your_api_key
@@ -94,84 +100,78 @@ The project is organized into a modular structure for clarity and separation of 
     ```bash
     npm start
     ```
-    The API will be available at `http://localhost:3001`.
 
 ---
 
-## API Endpoints
+## API Endpoints & Workflow
 
-All protected endpoints are versioned under `/api/v1` and require two authentication headers: `X-API-KEY` and `Authorization: Bearer <JWT>`.
+The API is designed for a multi-step, client-driven workflow. All protected endpoints are versioned under `/api/v1` and require `X-API-KEY` and `Authorization: Bearer <JWT>` headers.
 
 ### Public Endpoints
 
 #### `GET /health`
 Checks the health of the API and its dependencies.
--   **Success Response (`200 OK`):**
-    ```json
-    { "status": "ok", "dependencies": { "redis": "connected" } }
-    ```
--   **Error Response (`503 Service Unavailable`):**
-    ```json
-    { "status": "error", "dependencies": { "redis": "disconnected" } }
-    ```
 
 ### Protected Endpoints (v1)
 
+#### **Step 1 (Post-Login): Sync User Profile**
+#### `POST /api/v1/users/sync`
+To be called by the client application immediately after a successful user login. It checks if a user profile exists in the database and creates one if it doesn't.
+-   **Body:** None.
+-   **Success Response (`200 OK` or `201 Created`):**
+    ```json
+    {
+        "status": "synced",
+        "user": {
+            "id": 1,
+            "auth0_user_id": "google-oauth2|..."
+        }
+    }
+    ```
+
+#### **Step 2: Search for Content**
 #### `GET /api/v1/search`
-Searches for a movie or TV show.
+Performs a fast scrape to get a list of all matching content.
 -   **Query Parameters:**
     -   `title` (string, required): The title to search for.
-    -   `type` (string, optional): The type of content ('movie' or 'tv').
--   **Success Response (`200 OK`):**
+-   **Success Response (`200 OK`):** An array of search result objects.
     ```json
-    {
-      "id": "19788",
-      "type": "movie",
-      "title": "Interstellar",
-      "year": "2014",
-      "overview": "The adventures of a group of explorers...",
-      "posterUrl": "https://image.tmdb.org/t/p/w500/...",
-      "tmdbId": 157336
-    }
+    [
+        {
+            "id": "19788",
+            "title": "Interstellar",
+            "type": "movie",
+            "year": "2014",
+            "href": "https://fmovies.ro/movie/watch-interstellar-online-19788",
+            "posterUrl": "https://f.woowoowoowoo.net/.../poster.jpg"
+        }
+    ]
     ```
 
+#### **Step 3 (Optional): Get Detailed Metadata**
+#### `GET /api/v1/metadata`
+Retrieves the detailed plot overview for a specific item selected by the user.
+-   **Query Parameters:**
+    -   `id` (string, required): The `id` of the item from the `/search` response.
+    -   `url` (string, required): The `href` of the item from the `/search` response.
+
+#### **Step 4: Get Stream**
 #### `GET /api/v1/stream`
-Retrieves the stream sources and subtitles for a specific movie ID or TV show episode ID.
+Retrieves the stream sources and subtitles for a specific movie or episode ID.
 -   **Query Parameters:**
-    -   `id` (string, required): The ID from the `/search` endpoint (for movies) or `/episodes` endpoint (for TV).
+    -   `id` (string, required): The final ID of the content.
     -   `type` (string, required): The type of content ('movie' or 'tv').
--   **Success Response (`200 OK`):**
-    ```json
-    {
-      "sources": [
-        { "quality": "1080p", "url": "https://.../1080p.m3u8" },
-        { "quality": "720p", "url": "https://.../720p.m3u8" }
-      ],
-      "subtitles": [
-        { "file": "https://.../eng.vtt", "label": "English", "kind": "captions" }
-      ],
-      "decryptionKey": null,
-      "sourceServer": "MegaCloud",
-      "refererUrl": "https://videostr.net/..."
-    }
-    ```
 
-#### `GET /api/v1/seasons`
-Gets a list of seasons for a TV show.
--   **Query Parameters:**
-    -   `showId` (string, required): The `id` of a TV show from the `/search` endpoint.
-
-#### `GET /api/v1/episodes`
-Gets a list of episodes for a specific season.
--   **Query Parameters:**
-    -   `seasonId` (string, required): The `seasonId` from the `/seasons` endpoint.
+### TV Show Endpoints
+-   `GET /api/v1/seasons`
+-   `GET /api/v1/episodes`
 
 ---
 
 ## Future Development
 
-The API is stable and client-ready. The next major phase of development will focus on integrating a database (e.g., Supabase) to enable user-specific features.
+With the core API and user synchronization in place, the service is ready for client integration. The next logical phase is to build out more user-specific features that leverage the Supabase database.
 
--   **User Syncing:** Automatically create a user profile in the database upon their first authenticated request.
 -   **Watch History:** Implement endpoints to log and retrieve a user's viewing history.
 -   **Favorites / Watchlist:** Add functionality for users to save content to a personal list.
+-   **User Preferences:** Create endpoints to store and retrieve user-specific application settings.
